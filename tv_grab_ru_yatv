@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+
+########################################################################
+#
+#    tv_grab_ru_yatv
+#
+#    URL:       https://github.com/gSpotx2f/tv_grab_ru_yatv
+#    Depends:   Python >= 3.5
+#
+########################################################################
+
+import sys
+import os
+from urllib import request, parse
+import ssl
+from optparse import OptionParser
+import re
+import json
+import time
+from datetime import timedelta, datetime
+
+APP_NAME = "tv_grab_ru_yatv"
+APP_VERSION = 0.1
+APP_URL = "https://github.com/gSpotx2f/tv_grab_ru_yatv"
+SRC_NAME = "tv.yandex.ru"
+SRC_URL = "https://tv.yandex.ru/"
+SRC_API = "https://tv.yandex.ru/ajax/i-tv-region/get?resource=schedule"
+
+
+class Config:
+    defaultPrgTimeOffset = 0    # смещение времени в часах для пересчёта дат в передачах по умолчанию. Применяется ко всем каналам, для которых смещение не указано в конфиге. (0, 2, -3 и пр.)
+    userRegion = None           # регион программы для tv.yandex.ru. Если None, то не добавляется в запрос
+    duration = 7                # длительность программы в днях
+    startDayOffset = 0          # смещение времени начала программы в днях (0 - с сегодняшнего дня, 1 - завтра, 2 - послезавтра и пр.)
+    timeZone = "+03:00"         # таймзона для запроса. Учитывается сервером для определения времени начала программы
+    chansPerRequest = 3         # кол-во каналов в одном запросе (больше - меньше запросов к серверу, но и больше потребление памяти)
+    chansLogos = True           # добавлять в XMLTV ссылки на логотипы каналов (<icon>)
+    chansLogosURL = None        # если задана URL, то при добавлении ссылок на логотипы каналов (<icon>) URL создается след. образом: <chansLogosURL><channel-id><chansLogosExt>. Для добавления в XMLTV собственных лого каналов. Если None - ссылки на логотипы берутся с tv.yandex.ru
+    chansLogosExt = ".jpg"      # расширение для файлов пользовательских логотипов каналов
+    additionalTags = True       # добавлять в XMLTV дополнительные тэги передач
+    additionalTagsDict = {      # дополнительные тэги передач. tvheadend показывает в EPG только: <desc>, <category>, <icon>
+        "desc" : True,
+        "credits" : False,
+        "date" : False,
+        "category" : True,
+        "icon" : True,
+        "country" : False,
+    }
+    XMLTVIdSuffix = ".yatv"     # суффикс добавляется к XMLTV-id каналов
+    channelsFromTvh = False     # брать каналы из конфигурации tvheadend вместо каналов из конфига
+    tvhChannelsDir = "/home/hts/.hts/tvheadend/channel/config"  # директория с конфигами каналов tvheadend
+    replaceCategories = True    # замена категорий передач для tvheadend (чтобы отображались в EPG)
+    replaceCategoriesDict = {
+        #1 : "Other",                               # "другое"
+        2 : "News / Current Affairs",               # "инфо"    # "Social / Political issues / Economics"
+        3 : "Children's / Youth Programs",          # "детям"   # "Children's / Youth Programmes"
+        4 : "Soap / Melodrama / Folkloric",         # "сериалы"
+        5 : "Movie / drama",                        # "фильмы"
+        6 : "Leisure hobbies",                      # "досуг"
+        7 : "Sports",                               # "спорт"
+        8 : "Education / Science / Factual topics", # "познавательное"
+        9 : "Adult movie / Drama",                  # "для взрослых"
+        29139 : "News / Current Affairs",           # "новости"
+    }
+    apiURL = "//tv.yandex.ru/ajax/i-tv-region/get?resource=schedule"
+    HTTPScheme = "https:"
+    reqTimout = 0               # таймаут (сек.) между запросами к серверу при получении программы
+    tryConnectCounts = 3        # кол-во попыток http-соединения
+    tryConnectTimeout = 2       # пауза между попытками
+    proxies = None              # прокси сервер для граббера. Прим.: "proxies" : {"http" : "http://192.168.0.1:8080", "https" : "http://192.168.0.1:8080"}
+    HTTPSendHeadersDict = {
+        "User-Agent" : "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:52.5) Gecko/20100101 Firefox/52.5",
+    }
+    siteEncoding = "utf-8"
+    chansRequestParams = '"channelLimit":1000,"channelProgramsLimit":1,"fields":"schedules,channel,title,siteUrl,logo,originalSize,src,width,height,id,synonyms"'
+    outputHandler = sys.stdout
+    channelsIds = {}
+    channelsTitles = {}
+
+    @classmethod
+    def baseURL(cls):
+        return cls.HTTPScheme + cls.apiURL + (cls.userRegion and "&userRegion=" + str(cls.userRegion) or "")
+
+    @classmethod
+    def loadUserConfig(cls, filePath):
+        try:
+            with open(filePath, "rt") as fileHandler:
+                userConfig = eval(fileHandler.read())
+                if userConfig and type(userConfig) == dict:
+                    for k, v in userConfig.items():
+                        setattr(cls, k, v)
+        except SyntaxError:
+            print(" Configuration file has a syntax error! ( {} )".format(filePath), file = sys.stderr)
+            raise
+        except OSError as errObj:
+            print(" Configuration file error! ({})\n {}".format(USER_CONFIG, errObj), file = sys.stderr)
+            return False
+        else:
+            return True
+
+    @classmethod
+    def getChannelsFromTvh(cls):
+        if os.path.isdir(cls.tvhChannelsDir):
+            cls.channelsIds.clear()
+            tvhChannels = {}
+            for item in os.listdir(cls.tvhChannelsDir):
+                filePath = os.path.join(cls.tvhChannelsDir, item)
+                if os.path.isfile(filePath):
+                    try:
+                        with open(filePath, "rt") as fileHandler:
+                            reObj = re.search('"name": "([^"]+)"', fileHandler.read())
+                            chanName = reObj.group(1)
+                            if chanName:
+                                chanOffset = cls.channelsTitles.get(chanName)
+                                tvhChannels[chanName] = chanOffset or Config.defaultPrgTimeOffset
+                    except OSError:
+                        continue
+            cls.channelsTitles = tvhChannels
+            return True
+        else:
+            return False
+
+def getHTTPData(url, siteEncoding = "utf-8", method = "GET", postData = None, sendHeadersDict = None, proxies = None, tryConnectCounts = 3, tryConnectTimeout = 1):
+    HTTPBody = HTTPCode = receiveHeaders = None
+    openerObj = request.build_opener(request.ProxyHandler(proxies), request.HTTPSHandler(context = ssl._create_unverified_context()))
+    for i in range(tryConnectCounts):
+        try:
+            connObj = openerObj.open(request.Request(url, data = postData, headers = sendHeadersDict, method = method))
+            receiveHeaders = connObj.getheaders()
+            HTTPCode = connObj.status
+            if HTTPCode == 200:
+                HTTPBody = connObj.read().decode(siteEncoding)
+        except Exception as exceptionObj:
+            print(" Connection error! {} ( {} )".format(exceptionObj, url), file = sys.stderr)
+        else:
+            connObj.close()
+            break
+        time.sleep(tryConnectTimeout)
+    return HTTPBody, HTTPCode, receiveHeaders
+
+def timeRecalc(dateStr, tOffset):
+    offsetObj = timedelta(hours = tOffset)
+    reObj = re.fullmatch("([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})([+-][0-9]{2}):[0-9]{2}", dateStr)
+    dateObj = datetime(int(reObj.group(1)), int(reObj.group(2)), int(reObj.group(3)), int(reObj.group(4)), int(reObj.group(5)), int(reObj.group(6)))
+    newDateObj = dateObj + offsetObj
+    newTz = int(reObj.group(7)) + tOffset
+    newTzStr = "-{:0>2d}:00".format(-newTz) if (newTz < 0) else "+{:0>2d}:00".format(newTz)
+    return "{}{}".format(newDateObj.strftime("%Y-%m-%dT%H:%M:%S"), newTzStr)
+
+def prgDateConvert(dateStr, tOffset):
+    tOffset = Config.defaultPrgTimeOffset if (tOffset is None or tOffset is False) else tOffset
+    if tOffset:
+        dateStr = timeRecalc(dateStr, tOffset)
+    reObj = re.fullmatch("([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})([+-][0-9]{2}:[0-9]{2})", dateStr)
+    return "{} {}".format(re.sub("[T:-]", "", reObj.group(1)), re.sub(":", "", reObj.group(2)))
+
+def xmlCharReplace(string):
+    return string.replace("&", "&amp;")
+
+def makeChanXMLTV(JSONChanData):
+    if JSONChanData.get("channel"):
+        Config.outputHandler.write('<channel id="{}{}">\n'.format(JSONChanData["channel"]["id"], Config.XMLTVIdSuffix or ""))
+        if len(JSONChanData["channel"]["synonyms"]) == 0:
+            JSONChanData["channel"]["synonyms"].insert(0, JSONChanData["channel"]["title"])
+        for i in JSONChanData["channel"]["synonyms"]:
+            Config.outputHandler.write('<display-name lang="ru">{}</display-name>\n'.format(xmlCharReplace(i)))
+        if Config.chansLogos:
+            try:
+                Config.outputHandler.write('<icon src="{}" />\n'.format(Config.chansLogosURL + str(JSONChanData["channel"]["id"]) + Config.chansLogosExt if Config.chansLogosURL else Config.HTTPScheme + JSONChanData["channel"]["logo"]["originalSize"]["src"]))
+            except KeyError:
+                pass
+        try:
+            Config.outputHandler.write('<url>{}</url>\n'.format(JSONChanData["channel"]["siteUrl"]))
+        except KeyError:
+            pass
+        Config.outputHandler.write('</channel>\n')
+        return True
+
+def makeProgsXMLTV(JSONData):
+    if JSONData.get("schedules"):
+        for sched in JSONData["schedules"]:
+            if sched.get("events"):
+                for event in sched["events"]:
+                    Config.outputHandler.write('<programme start="{}" stop="{}" channel="{}{}">\n<title lang="ru">{}</title>\n'.format(prgDateConvert(event["start"], Config.channelsIds.get(str(event["channelId"]))), prgDateConvert(event["finish"], Config.channelsIds.get(str(event["channelId"]))), event["channelId"], Config.XMLTVIdSuffix or "", xmlCharReplace(event["program"]["title"])))
+                    if Config.additionalTags:
+                        if Config.additionalTagsDict.get("desc"):
+                            try:
+                                if event["program"]["description"]:
+                                    Config.outputHandler.write('<desc lang="ru">{}</desc>\n'.format(xmlCharReplace(event["program"]["description"])))
+                            except KeyError:
+                                pass
+                        if Config.additionalTagsDict.get("credits"):
+                            try:
+                                if event["program"]["persons"]:
+                                    Config.outputHandler.write("<credits>\n")
+                                    rolesDict = {
+                                        "director" : [],
+                                        "actor" : [],
+                                        "writer" : [],
+                                        "producer" : [],
+                                        "composer" : [],
+                                        "presenter" : [],
+                                    }
+                                    for i in event["program"]["persons"]:
+                                        if i["role"] in rolesDict:
+                                            rolesDict[i["role"]].append(i["name"])
+                                    for k, v in rolesDict.items():
+                                        for i in v:
+                                            Config.outputHandler.write('<{0}>{1}</{0}>\n'.format(k, i))
+                                    Config.outputHandler.write("</credits>\n")
+                            except KeyError:
+                                pass
+                        if Config.additionalTagsDict.get("date"):
+                            try:
+                                if event["socialDate"]:
+                                    Config.outputHandler.write('<date>{}</date>\n'.format(event["socialDate"].replace("-", "")))
+                            except KeyError:
+                                pass
+                        if Config.additionalTagsDict.get("category"):
+                            try:
+                                if Config.replaceCategories:
+                                    if event["program"]["type"]["id"] in Config.replaceCategoriesDict:
+                                        event["program"]["type"]["name"] = Config.replaceCategoriesDict[event["program"]["type"]["id"]]
+                                if event["program"]["type"]["name"]:
+                                    Config.outputHandler.write('<category lang="ru">{}</category>\n'.format(event["program"]["type"]["name"]))
+                            except KeyError:
+                                pass
+                        if Config.additionalTagsDict.get("icon"):
+                            try:
+                                if event["program"]["images"]:
+                                    for i in event["program"]["images"]:
+                                        Config.outputHandler.write('<icon src="{}{}" />\n'.format(Config.HTTPScheme, i["originalSize"]["src"]))
+                            except KeyError:
+                                pass
+                        if Config.additionalTagsDict.get("country"):
+                            try:
+                                if event["program"]["countries"]:
+                                    for i in event["program"]["countries"]:
+                                        Config.outputHandler.write('<country lang="ru">{}</country>\n'.format(i))
+                            except KeyError:
+                                pass
+                    Config.outputHandler.write('</programme>\n')
+        return True
+
+def concatAdditionalTagsReq():
+    reqStr = ""
+    if Config.additionalTagsDict.get("date"):
+        reqStr += "socialDate,"
+    if Config.additionalTagsDict.get("desc"):
+        reqStr += "description,"
+    if Config.additionalTagsDict.get("category"):
+        reqStr += "type,"
+    if Config.additionalTagsDict.get("country"):
+        reqStr += "countries,"
+    if Config.additionalTagsDict.get("icon"):
+        reqStr += "images,originalSize,src,"
+    if Config.additionalTagsDict.get("credits"):
+        reqStr += "persons,name,role,"
+    return reqStr
+
+def getProgramsData():
+    i = 0
+    while i < len(Config.channelsIds):
+        idsStr = parse.quote(",".join(tuple(Config.channelsIds.keys())[i:(i + Config.chansPerRequest)]))
+        HTTPData, code, headers = getHTTPData(Config.progsRequestURLPattern.format(idsStr), sendHeadersDict = Config.HTTPSendHeadersDict, proxies = Config.proxies, tryConnectCounts = Config.tryConnectCounts, tryConnectTimeout = Config.tryConnectTimeout)
+        if HTTPData:
+            try:
+                jsonDict = json.loads(HTTPData)
+            except json.decoder.JSONDecodeError:
+                pass
+            else:
+                yield jsonDict
+        i += Config.chansPerRequest
+
+def makeChannelsDict(JSONData, synonyms):
+    channelsDict = {}
+    if JSONData.get("schedules"):
+        for i in JSONData["schedules"]:
+            if synonyms:
+                i["channel"]["synonyms"].insert(0, i["channel"]["title"])
+                for j in i["channel"]["synonyms"]:
+                    channelsDict[j.lower()] = i["channel"]["id"]
+            else:
+                channelsDict[i["channel"]["title"]] = i["channel"]["id"]
+    return channelsDict
+
+def getChannelsData():
+    jsonDict = {}
+    chansRequestURL = "{}&params={{{}}}".format(Config.baseURL(), parse.quote(Config.chansRequestParams))
+    HTTPData, code, headers = getHTTPData(chansRequestURL, sendHeadersDict = Config.HTTPSendHeadersDict, proxies = Config.proxies, tryConnectCounts = Config.tryConnectCounts, tryConnectTimeout = Config.tryConnectTimeout)
+    if HTTPData:
+        try:
+            jsonDict = json.loads(HTTPData)
+        except json.decoder.JSONDecodeError:
+            pass
+    return jsonDict
+
+def makeChannelsOutput(JSONData):
+    if JSONData.get("schedules"):
+        for jsonDict in JSONData["schedules"]:
+            if str(jsonDict["channel"]["id"]) in Config.channelsIds:
+                yield jsonDict
+
+def configureOutput(configHandler):
+    c = 0
+    channelsDict = makeChannelsDict(getChannelsData(), False)
+    cfgList = [
+        "defaultPrgTimeOffset",
+        "userRegion",
+        "duration",
+        "startDayOffset",
+        "timeZone",
+        "chansPerRequest",
+        "chansLogos",
+        "chansLogosURL",
+        "chansLogosExt",
+        "additionalTags",
+        "additionalTagsDict",
+        "XMLTVIdSuffix",
+        "channelsFromTvh",
+        "tvhChannelsDir",
+        "replaceCategories",
+        "proxies",
+    ]
+    cfgStr = ""
+    for i in cfgList:
+        attr = getattr(Config, i)
+        cfgStr += '    "' + i + '" : ' + ((type(attr) == str) and '"' + str(attr) + '"' or (type(attr) == dict) and repr(attr).replace("{", "{\n        ").replace(",", ",\n       ").replace("}", "\n    }") or str(attr)) + ',\n'
+    configHandler.write('{{\n{}    "channelsIds" : {{\n'.format(cfgStr))
+    for k, v in channelsDict.items():
+        configHandler.write('        "{}" : {},\t\t# {}. {}\n'.format(v, None, c + 1, k))
+        c += 1
+    configHandler.write('    },\n    "channelsTitles" : {},\n}\n')
+    return c
+
+def main():
+    Config.additionalTagsParams = (Config.additionalTags) and concatAdditionalTagsReq() or ""
+    Config.startDate = "{}{}".format(time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(round(time.time()) + Config.startDayOffset * 86400)), Config.timeZone)
+    Config.progsRequestParams = '"channelLimit":{},"channelProgramsLimit":500,"fields":"availableChannels,availableChannelsIds,schedules,title,{}id,events,channelId,start,finish,program,name","duration":{},"start":"{}"'.format(Config.chansPerRequest, Config.additionalTagsParams, Config.duration * 86400, Config.startDate)
+    Config.progsRequestURLPattern = Config.baseURL() + '&params={{' + parse.quote(Config.progsRequestParams + ',"channelIds":[{}]', safe = "{}") + '}}'
+    returnCode = 1
+    if Config.channelsFromTvh:
+        if not Config.getChannelsFromTvh():
+            print(" Path error! {} not a directory or does not exists".format(Config.tvhChannelsDir), file = sys.stderr)
+            return returnCode
+    JSONChansData = getChannelsData()
+    if JSONChansData:
+        channelsDict = makeChannelsDict(JSONChansData, True)
+        for k, v in Config.channelsTitles.items():
+            if channelsDict.get(k.lower()):
+                Config.channelsIds[str(channelsDict[k.lower()])] = v
+        if len(Config.channelsIds) == 0:
+            for k, v in channelsDict.items():
+                Config.channelsIds[str(v)] = Config.defaultPrgTimeOffset
+    Config.outputHandler.write('<?xml version="1.0" encoding="{}"?>\n<!DOCTYPE tv SYSTEM "xmltv.dtd">\n<tv source-info-url="{}" source-info-name="{}" source-data-url="{}" generator-info-name="{}" generator-info-url="{}">\n'.format(Config.siteEncoding, SRC_URL, SRC_NAME, SRC_API, APP_NAME, APP_URL))
+    chansItems, chansRequests = 0, 0
+    for c in makeChannelsOutput(JSONChansData):
+        if makeChanXMLTV(c):
+            chansItems += 1
+    if chansItems > 0:
+        for j in getProgramsData():
+            if makeProgsXMLTV(j):
+                chansRequests += 1
+            if Config.reqTimout:
+                time.sleep(Config.reqTimout)
+        if chansRequests > 0:
+            returnCode = 0
+    Config.outputHandler.write("</tv>\n")
+    return returnCode
+
+if __name__ == "__main__":
+    DEFAULT_USER_CONFIG = USER_CONFIG = None
+    for path in ("tv_grab_ru_yatv.cfg", "/home/hts/tv_grab_ru_yatv.cfg", "/etc/tv_grab_ru_yatv.cfg", "/opt/etc/tv_grab_ru_yatv.cfg"):
+        if os.path.exists(path):
+            DEFAULT_USER_CONFIG = path
+            break
+    optParser = OptionParser()
+    optParser.add_option("--config-file", action = "store", type = "string", help = "Configuration file", dest = "config_file")
+    optParser.add_option("--offset", action = "store", type = "int", help = "Start offset (days)", dest = "offset")
+    optParser.add_option("--days", action = "store", type = "int", help = "Duration", dest = "days")
+    optParser.add_option("--output", action = "store", type = "string", help = "Output file", dest = "output")
+    optParser.add_option("--configure", action = "store_true", help = "Create default configuration file", dest = "configure")
+    optParser.add_option("--version", action = "store_true", help = "Version", dest = "version")
+    optParser.add_option("--description", action = "store_true", help = "Description", dest = "description")
+    optParser.add_option("--capabilities", action = "store_true", help = "Capabilities", dest = "capabilities")
+    optParser.add_option("--quiet", action = "store_true", help = "Quiet output", dest = "quiet")
+    optParser.add_option("--region", action = "store", type = "int", help = "Region value for tv.yandex.ru", dest = "region")
+    options, args = optParser.parse_args()
+    if options.config_file:
+        USER_CONFIG = options.config_file
+    if options.configure:
+        if options.region:
+            Config.userRegion = options.region
+        try:
+            configHandler = open(USER_CONFIG, "w") if USER_CONFIG else sys.stdout
+        except OSError as errObj:
+            print(" Configuration file error! ( {} )\n {}".format(USER_CONFIG, errObj), file = sys.stderr)
+            sys.exit(1)
+        if configureOutput(configHandler) > 0:
+            sys.exit(0)
+        else:
+            sys.exit(1)
+    USER_CONFIG = USER_CONFIG or DEFAULT_USER_CONFIG
+    if USER_CONFIG:
+        if not Config.loadUserConfig(USER_CONFIG):
+            sys.exit(1)
+    if options.region:
+        Config.userRegion = options.region
+    if options.offset:
+        Config.startDayOffset = options.offset
+    if options.days:
+        Config.duration = options.days
+    elif options.version:
+        print(APP_VERSION)
+        sys.exit(0)
+    elif options.description:
+        print("Russian {} ({})".format(SRC_NAME, APP_NAME))
+        sys.exit(0)
+    elif options.capabilities:
+        print("baseline\nmanualconfig")
+        sys.exit(0)
+    if options.output:
+        try:
+            Config.outputHandler = open(options.output, "wt")
+        except OSError as errObj:
+            print(" Output file error! ( {} )\n {}".format(options.output, errObj), file = sys.stderr)
+            sys.exit(1)
+    returnCode = main()
+    sys.exit(returnCode)
