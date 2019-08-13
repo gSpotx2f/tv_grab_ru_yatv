@@ -12,6 +12,7 @@
 import sys
 import os
 from urllib import request, parse
+import socket
 import ssl
 from optparse import OptionParser
 import re
@@ -65,7 +66,8 @@ class Config:
     apiURL = "//tv.yandex.ru/ajax/i-tv-region/get?resource=schedule"
     HTTPScheme = "https:"
     reqTimout = 0               # таймаут (сек.) между запросами к серверу при получении программы
-    tryConnectCounts = 3        # кол-во попыток http-соединения
+    connectTimeout = socket._GLOBAL_DEFAULT_TIMEOUT     # таймаут соединения
+    tryConnectAttempts = 3      # кол-во попыток http-соединения
     tryConnectTimeout = 2       # пауза между попытками
     proxies = None              # прокси сервер для граббера. Прим.: "proxies" : {"http" : "http://192.168.0.1:8080", "https" : "http://192.168.0.1:8080"}
     HTTPSendHeadersDict = {
@@ -120,12 +122,12 @@ class Config:
         else:
             return False
 
-def getHTTPData(url, siteEncoding = "utf-8", method = "GET", postData = None, sendHeadersDict = None, proxies = None, tryConnectCounts = 3, tryConnectTimeout = 1):
+def getHTTPData(url, siteEncoding = "utf-8", method = "GET", postData = None, sendHeadersDict = None, proxies = None, tryConnectAttempts = 3, tryConnectTimeout = 1):
     HTTPBody = HTTPCode = receiveHeaders = None
     openerObj = request.build_opener(request.ProxyHandler(proxies), request.HTTPSHandler(context = ssl._create_unverified_context()))
-    for i in range(tryConnectCounts):
+    for i in range(tryConnectAttempts):
         try:
-            connObj = openerObj.open(request.Request(url, data = postData, headers = sendHeadersDict, method = method))
+            connObj = openerObj.open(request.Request(url, data = postData, headers = sendHeadersDict, method = method), timeout = Config.connectTimeout)
             receiveHeaders = connObj.getheaders()
             HTTPCode = connObj.status
             if HTTPCode == 200:
@@ -262,7 +264,7 @@ def getProgramsData():
     i = 0
     while i < len(Config.channelsIds):
         idsStr = parse.quote(",".join(tuple(Config.channelsIds.keys())[i:(i + Config.chansPerRequest)]))
-        HTTPData, code, headers = getHTTPData(Config.progsRequestURLPattern.format(idsStr), sendHeadersDict = Config.HTTPSendHeadersDict, proxies = Config.proxies, tryConnectCounts = Config.tryConnectCounts, tryConnectTimeout = Config.tryConnectTimeout)
+        HTTPData, code, headers = getHTTPData(Config.progsRequestURLPattern.format(idsStr), sendHeadersDict = Config.HTTPSendHeadersDict, proxies = Config.proxies, tryConnectAttempts = Config.tryConnectAttempts, tryConnectTimeout = Config.tryConnectTimeout)
         if HTTPData:
             try:
                 jsonDict = json.loads(HTTPData)
@@ -287,7 +289,7 @@ def makeChannelsDict(JSONData, synonyms):
 def getChannelsData():
     jsonDict = {}
     chansRequestURL = "{}&params={{{}}}".format(Config.baseURL(), parse.quote(Config.chansRequestParams))
-    HTTPData, code, headers = getHTTPData(chansRequestURL, sendHeadersDict = Config.HTTPSendHeadersDict, proxies = Config.proxies, tryConnectCounts = Config.tryConnectCounts, tryConnectTimeout = Config.tryConnectTimeout)
+    HTTPData, code, headers = getHTTPData(chansRequestURL, sendHeadersDict = Config.HTTPSendHeadersDict, proxies = Config.proxies, tryConnectAttempts = Config.tryConnectAttempts, tryConnectTimeout = Config.tryConnectTimeout)
     if HTTPData:
         try:
             jsonDict = json.loads(HTTPData)
