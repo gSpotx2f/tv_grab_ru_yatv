@@ -34,10 +34,9 @@ def _get_http_data(
         ssl_unverified=False,
         error_handler=sys.stderr):
     http_body = http_code = received_headers = None
-    opener_args = (
-        request.ProxyHandler(proxies),
-        request.HTTPSHandler(context=ssl._create_unverified_context())
-    ) if ssl_unverified else (request.ProxyHandler(proxies),)
+    opener_args = [request.ProxyHandler(proxies)]
+    if ssl_unverified:
+        opener_args.append(request.HTTPSHandler(context=ssl._create_unverified_context()))
     opener_obj = request.build_opener(*opener_args)
     for i in range(try_connect_attempts):
         try:
@@ -123,7 +122,7 @@ class YaTv:
         self.proxies = None
         self.ssl_unverified = False
         self.http_send_headers_dict = {
-            "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:52.5) Gecko/20100101 Firefox/52.5",
+            "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:69.0) Gecko/20100101 Firefox/69.0",
         }
         self.output_handler = sys.stdout
         self.error_handler = sys.stderr
@@ -471,7 +470,7 @@ class YaTv:
 
 
 if __name__ == "__main__":
-    from optparse import OptionParser
+    from argparse import ArgumentParser
     yatv = YaTv()
     default_user_config = user_config = config_handler = None
     for path in ("tv_grab_ru_yatv.cfg", "/home/hts/tv_grab_ru_yatv.cfg",
@@ -479,33 +478,33 @@ if __name__ == "__main__":
         if os.path.exists(path):
             default_user_config = path
             break
-    optParser = OptionParser()
-    optParser.add_option("--config-file", action="store", type="string",
+    arg_parser = ArgumentParser()
+    arg_parser.add_argument("--config-file", action="store", type=str,
         help="Configuration file", dest="config_file")
-    optParser.add_option("--offset", action="store", type="int",
+    arg_parser.add_argument("--offset", action="store", type=int,
         help="Start offset (days)", dest="offset")
-    optParser.add_option("--days", action="store", type="int",
+    arg_parser.add_argument("--days", action="store", type=int,
         help="Duration", dest="days")
-    optParser.add_option("--output", action="store", type="string",
+    arg_parser.add_argument("--output", action="store", type=str,
         help="Output file", dest="output")
-    optParser.add_option("--configure", action="store_true",
+    arg_parser.add_argument("--configure", action="store_true",
         help="Create default configuration file", dest="configure")
-    optParser.add_option("--version", action="store_true",
+    arg_parser.add_argument("--version", action="store_true",
         help="Version", dest="version")
-    optParser.add_option("--description", action="store_true",
+    arg_parser.add_argument("--description", action="store_true",
         help="Description", dest="description")
-    optParser.add_option("--capabilities", action="store_true",
+    arg_parser.add_argument("--capabilities", action="store_true",
         help="Capabilities", dest="capabilities")
-    optParser.add_option("--quiet", action="store_true",
+    arg_parser.add_argument("--quiet", action="store_true",
         help="Quiet output", dest="quiet")
-    optParser.add_option("--region", action="store", type="int",
+    arg_parser.add_argument("--region", action="store", type=int,
         help="Region value for tv.yandex.ru", dest="region")
-    options, _ = optParser.parse_args()
-    if options.config_file:
-        user_config = options.config_file
-    if options.configure:
-        if options.region:
-            yatv.user_region = options.region
+    args = arg_parser.parse_args()
+    if args.config_file:
+        user_config = args.config_file
+    if args.configure:
+        if args.region:
+            yatv.user_region = args.region
         try:
             if user_config:
                 config_handler = open(user_config, "w")
@@ -522,26 +521,26 @@ if __name__ == "__main__":
     if user_config:
         if not yatv.load_user_config(user_config):
             sys.exit(1)
-    if options.region:
-        yatv.user_region = options.region
-    if options.offset:
-        yatv.start_day_offset = options.offset
-    if options.days:
-        yatv.duration = options.days
-    if options.version:
+    if args.region:
+        yatv.user_region = args.region
+    if args.offset:
+        yatv.start_day_offset = args.offset
+    if args.days:
+        yatv.duration = args.days
+    if args.version:
         print(yatv.app_version)
         sys.exit(0)
-    elif options.description:
+    elif args.description:
         print(f"Russian {yatv.src_name} ({yatv.app_name})")
         sys.exit(0)
-    elif options.capabilities:
+    elif args.capabilities:
         print("baseline\nmanualconfig")
         sys.exit(0)
-    if options.output:
+    if args.output:
         try:
-            yatv.output_handler = open(options.output, "w")
+            yatv.output_handler = open(args.output, "w")
         except OSError as err_obj:
-            print(f" Output file error! ( {options.output} )\n {err_obj}",
+            print(f" Output file error! ( {args.output} )\n {err_obj}",
                 file=sys.stderr)
             sys.exit(1)
     sys.exit(yatv.run())
