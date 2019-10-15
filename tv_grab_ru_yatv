@@ -18,50 +18,13 @@ import ssl
 import sys
 import time
 from urllib import request, parse
-#import xml.sax.saxutils as xsu
-
-
-def _get_http_data(
-        url,
-        encoding="utf-8",
-        method="GET",
-        post_data=None,
-        send_headers_dict=None,
-        proxies=None,
-        try_connect_attempts=3,
-        try_connect_timeout=1,
-        connect_timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
-        ssl_unverified=False,
-        error_handler=sys.stderr):
-    http_body = http_code = received_headers = None
-    opener_args = [request.ProxyHandler(proxies)]
-    if ssl_unverified:
-        opener_args.append(request.HTTPSHandler(context=ssl._create_unverified_context()))
-    opener_obj = request.build_opener(*opener_args)
-    for i in range(try_connect_attempts):
-        try:
-            conn_obj = opener_obj.open(
-                request.Request(url, data=post_data, headers=send_headers_dict,
-                                method=method),
-                timeout=connect_timeout
-            )
-            received_headers = conn_obj.getheaders()
-            http_code = conn_obj.status
-            if http_code == 200:
-                http_body = conn_obj.read().decode(encoding)
-        except Exception as exception_obj:
-            print(f" Connection error! {exception_obj} ( {url} )",
-                file=error_handler)
-        else:
-            conn_obj.close()
-            break
-        time.sleep(try_connect_timeout)
-    return http_body, http_code, received_headers
+from xml.etree.ElementTree import Element, SubElement, tostring
+#from xml.sax.saxutils import escape
 
 
 class YaTv:
     app_name = "tv_grab_ru_yatv"
-    app_version = 0.2
+    app_version = 0.3
     app_url = "https://github.com/gSpotx2f/tv_grab_ru_yatv"
     src_name = "tv.yandex.ru"
     src_url = "https://tv.yandex.ru/"
@@ -78,7 +41,7 @@ class YaTv:
         "credits": "persons,name,role",
     }
     xmltv_credits = ("director", "actor", "writer",
-                    "producer", "composer", "presenter")
+                     "producer", "composer", "presenter")
     replace_categories_dict = {
         #1: "Other",                                # "другое"
         2: "News / Current Affairs",                # "инфо"    # "Social / Political issues / Economics"
@@ -112,10 +75,9 @@ class YaTv:
             "credits": False,
         }
         self.xmltv_id_suffix = ".yatv"
-        self.channels_from_tvh = False
-        self.tvh_channels_dir = "/home/hts/.hts/tvheadend/channel/config"
         self.replace_categories = True
-        self.req_timout = 0
+        self.req_timeout = 0
+        self.connection_opener = None
         self.connect_timeout = socket._GLOBAL_DEFAULT_TIMEOUT
         self.try_connect_attempts = 3
         self.try_connect_timeout = 2
@@ -124,7 +86,6 @@ class YaTv:
         self.http_send_headers_dict = {
             "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:69.0) Gecko/20100101 Firefox/69.0",
         }
-        self.output_handler = sys.stdout
         self.error_handler = sys.stderr
         self.channels_ids = {}
         self.channels_titles = {}
@@ -146,61 +107,36 @@ class YaTv:
     def chans_request_url(self):
         return f"{self.base_url}&params={{{parse.quote(self.chans_request_params)}}}"
 
-    def load_user_config(self, file_path):
-        try:
-            with open(file_path, "rt") as file_handler:
-                user_config = eval(file_handler.read())
-                if user_config and type(user_config) == dict:
-                    for k, v in user_config.items():
-                        setattr(self, k, v)
-        except SyntaxError:
-            print(f" Configuration file has a syntax error! ( {file_path} )",
-                file=self.error_handler)
-            raise
-        except OSError as err_obj:
-            print(f" Configuration file error! ({file_path})\n {err_obj}",
-                file=self.error_handler)
-            return False
-        else:
-            return True
-
-    def get_channels_from_tvh(self):
-        if not os.path.isdir(self.tvh_channels_dir):
-            return False
-        self.channels_ids.clear()
-        tvh_channels = {}
-        for item in os.listdir(self.tvh_channels_dir):
-            file_path = os.path.join(self.tvh_channels_dir, item)
-            if not os.path.isfile(file_path):
-                return False
+    def _open_url(self, url, method="GET", post_data=None, send_headers_dict=None):
+        if not self.connection_opener:
+            opener_args = [request.ProxyHandler(self.proxies)]
+            if self.ssl_unverified:
+                opener_args.append(request.HTTPSHandler(context=ssl._create_unverified_context()))
+            self.connection_opener = request.build_opener(*opener_args)
+        http_body = http_code = received_headers = None
+        for i in range(self.try_connect_attempts):
             try:
-                with open(file_path, "rt") as file_handler:
-                    re_obj = re.search('"name": "([^"]+)"', file_handler.read())
-                    chan_name = re_obj.group(1)
-                    if chan_name:
-                        chan_offset = self.channels_titles.get(chan_name)
-                        tvh_channels[chan_name] = chan_offset or self.default_prg_time_offset
-            except OSError:
-                continue
-        self.channels_titles = tvh_channels
-        return True
-
-    def _open_url(self, url):
-        return _get_http_data(
-            url,
-            encoding=self.site_encoding,
-            send_headers_dict=self.http_send_headers_dict,
-            proxies=self.proxies,
-            try_connect_attempts=self.try_connect_attempts,
-            try_connect_timeout=self.try_connect_timeout,
-            connect_timeout=self.connect_timeout,
-            ssl_unverified=self.ssl_unverified,
-            error_handler=self.error_handler
-        )[0]
+                conn_obj = self.connection_opener.open(
+                    request.Request(url, data=post_data, headers=send_headers_dict or self.http_send_headers_dict,
+                                    method=method),
+                    timeout=self.connect_timeout
+                )
+                received_headers = conn_obj.getheaders()
+                http_code = conn_obj.status
+                if http_code == 200:
+                    http_body = conn_obj.read().decode(self.site_encoding)
+            except Exception as exception_obj:
+                print(f" Connection error! {exception_obj} ( {url} )",
+                      file=self.error_handler)
+            else:
+                conn_obj.close()
+                break
+            time.sleep(self.try_connect_timeout)
+        return http_body, http_code, received_headers
 
     @staticmethod
     def _replace_xml_char(string):
-        #return xsu.escape(string)
+        #return escape(string)
         if "&" in string:
             string = string.replace("&", "&amp;")
         if "<" in string:
@@ -233,20 +169,19 @@ class YaTv:
             date_str)
         return f'{re.sub("[T:-]", "", re_obj.group(1))} {re.sub(":", "", re_obj.group(2))}'
 
-    def _write_chan_xmltv(self, json_chan_data):
+    def _construct_chan_xmltv(self, json_chan_data):
+        elements = []
         if "channel" not in json_chan_data:
             return False
-        self.output_handler.write(
-            f'<channel id="{json_chan_data["channel"]["id"]}{self.xmltv_id_suffix or ""}">\n')
+        elements.append(f'<channel id="{json_chan_data["channel"]["id"]}{self.xmltv_id_suffix or ""}">\n')
         if not json_chan_data["channel"]["synonyms"]:
             json_chan_data["channel"]["synonyms"].insert(
                 0, json_chan_data["channel"]["title"])
         for i in json_chan_data["channel"]["synonyms"]:
-            self.output_handler.write(
-                f'<display-name lang="ru">{self._replace_xml_char(i)}</display-name>\n')
+            elements.append(f'<display-name lang="ru">{self._replace_xml_char(i)}</display-name>\n')
         if self.chans_logos:
             try:
-                self.output_handler.write(
+                elements.append(
                     f'<icon src="{self.chans_logos_url}{json_chan_data["channel"]["id"]}{self.chans_logos_ext}" />\n'
                     if self.chans_logos_url else
                     f'<icon src="{self.http_scheme}{json_chan_data["channel"]["logo"]["originalSize"]["src"]}" />\n'
@@ -254,17 +189,18 @@ class YaTv:
             except KeyError:
                 pass
         try:
-            self.output_handler.write(f'<url>{json_chan_data["channel"]["siteUrl"]}</url>\n')
+            elements.append(f'<url>{json_chan_data["channel"]["siteUrl"]}</url>\n')
         except KeyError:
             pass
-        self.output_handler.write('</channel>\n')
-        return True
+        elements.append('</channel>\n')
+        return ''.join(elements)
 
-    def _write_tags_xmltv(self, event):
+    def _construct_tags_xmltv(self, event):
+        elements = []
         if self.additional_tags_dict.get("desc"):
             try:
                 if event["program"]["description"]:
-                    self.output_handler.write(
+                    elements.append(
                         f'<desc lang="ru">{self._replace_xml_char(event["program"]["description"])}</desc>\n')
             except KeyError:
                 pass
@@ -275,18 +211,18 @@ class YaTv:
                         key=lambda s: self.xmltv_credits.index(s["role"])
                             if s["role"] in self.xmltv_credits else 0
                     )
-                    self.output_handler.write("<credits>\n")
+                    elements.append("<credits>\n")
                     for i in event["program"]["persons"]:
                         if i["role"] in self.xmltv_credits:
-                            self.output_handler.write(
+                            elements.append(
                                 '<{0[role]}>{0[name]}</{0[role]}>\n'.format(i))
-                    self.output_handler.write("</credits>\n")
+                    elements.append("</credits>\n")
             except KeyError:
                 pass
         if self.additional_tags_dict.get("date"):
             try:
                 if event["socialDate"]:
-                    self.output_handler.write(
+                    elements.append(
                         f'<date>{event["socialDate"].replace("-", "")}</date>\n')
             except KeyError:
                 pass
@@ -296,7 +232,7 @@ class YaTv:
                     if event["program"]["type"]["id"] in self.replace_categories_dict:
                         event["program"]["type"]["name"] = self.replace_categories_dict[event["program"]["type"]["id"]]
                 if event["program"]["type"]["name"]:
-                    self.output_handler.write(
+                    elements.append(
                         f'<category lang="ru">{event["program"]["type"]["name"]}</category>\n')
             except KeyError:
                 pass
@@ -304,7 +240,7 @@ class YaTv:
             try:
                 if event["program"]["images"]:
                     for i in event["program"]["images"]:
-                        self.output_handler.write(
+                        elements.append(
                             f'<icon src="{self.http_scheme}{i["originalSize"]["src"]}" />\n')
             except KeyError:
                 pass
@@ -312,36 +248,38 @@ class YaTv:
             try:
                 if event["program"]["countries"]:
                     for i in event["program"]["countries"]:
-                        self.output_handler.write(
+                        elements.append(
                             f'<country lang="ru">{i}</country>\n')
             except KeyError:
                 pass
+        return elements
 
-    def _write_progs_xmltv(self, json_data):
+    def _construct_progs_xmltv(self, json_data):
+        elements = []
         if "schedules" not in json_data:
             return False
         for sched in json_data["schedules"]:
             if "events" not in sched:
                 continue
             for event in sched["events"]:
-                self.output_handler.write(
+                elements.append(
                     f'<programme start="{self._convert_prg_date(event["start"], self.channels_ids.get(str(event["channelId"])))}" stop="{self._convert_prg_date(event["finish"], self.channels_ids.get(str(event["channelId"])))}" channel="{event["channelId"]}{self.xmltv_id_suffix or ""}">\n<title lang="ru">{self._replace_xml_char(event["program"]["title"])}</title>\n')
                 if self.additional_tags:
-                    self._write_tags_xmltv(event)
-                self.output_handler.write('</programme>\n')
-        return True
+                    elements += self._construct_tags_xmltv(event)
+                elements.append('</programme>\n')
+        return ''.join(elements)
 
     def _get_programs_data(self):
-        ids_tuple = tuple(self.channels_ids.keys())
+        ids_seq = tuple(self.channels_ids.keys())
         i = 0
-        while i < len(ids_tuple):
+        while i < len(ids_seq):
             http_data = self._open_url(
                 self.progs_request_url_pattern.format(
                     parse.quote(
-                        ",".join(ids_tuple[i:(i + self.chans_per_request)])
+                        ",".join(ids_seq[i:(i + self.chans_per_request)])
                     )
                 )
-            )
+            )[0]
             if http_data:
                 try:
                     json_dict = json.loads(http_data)
@@ -353,7 +291,7 @@ class YaTv:
 
     def _get_channels_data(self):
         json_dict = {}
-        http_data = self._open_url(self.chans_request_url)
+        http_data = self._open_url(self.chans_request_url)[0]
         if http_data:
             try:
                 json_dict = json.loads(http_data)
@@ -361,7 +299,8 @@ class YaTv:
                 pass
         return json_dict
 
-    def _make_channels_dict(self, json_data, synonyms=False):
+    @staticmethod
+    def _make_channels_dict(json_data, synonyms=False):
         channels_dict = {}
         if "schedules" not in json_data:
             return channels_dict
@@ -372,7 +311,7 @@ class YaTv:
                     channels_dict[j.lower()] = str(i["channel"]["id"])
         else:
             channels_dict = {
-                i["channel"]["title"] : str(i["channel"]["id"])
+                i["channel"]["title"]: str(i["channel"]["id"])
                 for i in json_data["schedules"]
             }
         return channels_dict
@@ -383,6 +322,205 @@ class YaTv:
         for json_dict in json_data["schedules"]:
             if str(json_dict["channel"]["id"]) in self.channels_ids:
                 yield json_dict
+
+    def run(self):
+        """Запуск граббера. Функция-генератор.
+        Возвращает XMLTV по одному тэгу (заголовок документа <tv>, <channel>, <programme>) за раз.
+        Вызов через протокол генератора (в цикле for, next() и пр.)"""
+        progs_request_params = f'"channelLimit":{self.chans_per_request},"channelProgramsLimit":500,"fields":"availableChannels,availableChannelsIds,schedules,title,{self.additional_tags and self.additional_tags_req_str or ""}id,events,channelId,start,finish,program,name","duration":{self.duration * 86400},"start":"{self.start_date}"'
+        self.progs_request_url_pattern = self.base_url + '&params={{' + parse.quote(
+            progs_request_params + ',"channelIds":[{}]', safe="{}"
+        ) + '}}'
+        json_chans_data = self._get_channels_data()
+        if json_chans_data:
+            channels_dict = self._make_channels_dict(json_chans_data, True)
+            for k, v in self.channels_titles.items():
+                if k.lower() in channels_dict:
+                    self.channels_ids[channels_dict[k.lower()]] = v
+            if not self.channels_ids:
+                for k, v in channels_dict.items():
+                    self.channels_ids[v] = self.default_prg_time_offset
+        yield f'<?xml version="1.0" encoding="{self.site_encoding}"?>\n<!DOCTYPE tv SYSTEM "xmltv.dtd">\n<tv source-info-url="{self.src_url}" source-info-name="{self.src_name}" source-data-url="{self.http_scheme}{self.api_url}" generator-info-name="{self.app_name}" generator-info-url="{self.app_url}">\n'
+        chans_items = 0
+        for c in self._pick_channels_json(json_chans_data):
+            channel = self._construct_chan_xmltv(c)
+            if channel:
+                yield channel
+                chans_items += 1
+        if chans_items > 0:
+            for j in self._get_programs_data():
+                yield self._construct_progs_xmltv(j)
+                if self.req_timeout:
+                    time.sleep(self.req_timeout)
+        yield "</tv>\n"
+
+
+class YaTvElTree(YaTv):
+    """Класс использует парсер ElementTree для создания XML.
+    Работает медленнее "ручного" способа склеивания строк (на слабом железе более чем в 2 раза!),
+    но всегда создаёт гарантированно валидный XML.
+    Итоговый XML не отформатирован, нет отступов и переносов строк для тэгов.
+    Подключить можно наследованием, ниже в определении класса YaTvExternalConfig:
+        YaTvExternalConfig(YaTvElTree)"""
+    def _construct_chan_xmltv(self, json_chan_data):
+        if "channel" not in json_chan_data:
+            return False
+        if not json_chan_data["channel"]["synonyms"]:
+            json_chan_data["channel"]["synonyms"].insert(
+                0, json_chan_data["channel"]["title"])
+        chan = Element("channel", {"id": f'{json_chan_data["channel"]["id"]}{self.xmltv_id_suffix or ""}'})
+        for i in json_chan_data["channel"]["synonyms"]:
+            SubElement(chan, "display-name", {"lang": "ru"}).text = i
+        if self.chans_logos:
+            try:
+                SubElement(
+                    chan,
+                    "icon",
+                    {
+                        "src": f'{self.chans_logos_url}{json_chan_data["channel"]["id"]}{self.chans_logos_ext}'
+                               if self.chans_logos_url else
+                               f'{self.http_scheme}{json_chan_data["channel"]["logo"]["originalSize"]["src"]}'
+                    }
+                )
+            except KeyError:
+                pass
+        try:
+            SubElement(chan, "url").text = json_chan_data["channel"]["siteUrl"]
+        except KeyError:
+            pass
+        return tostring(chan, encoding="unicode")
+
+    def _construct_tags_xmltv(self, event):
+        elements = []
+        if self.additional_tags_dict.get("desc"):
+            try:
+                if event["program"]["description"]:
+                    e = Element("desc", {"lang": "ru"})
+                    e.text = event["program"]["description"]
+                    elements.append(e)
+            except KeyError:
+                pass
+        if self.additional_tags_dict.get("credits"):
+            try:
+                if event["program"]["persons"]:
+                    event["program"]["persons"].sort(
+                        key=lambda s: self.xmltv_credits.index(s["role"])
+                            if s["role"] in self.xmltv_credits else 0
+                    )
+                    e = Element("credits")
+                    for i in event["program"]["persons"]:
+                        if i["role"] in self.xmltv_credits:
+                            SubElement(e, i["role"]).text = i["name"]
+                    elements.append(e)
+            except KeyError:
+                pass
+        if self.additional_tags_dict.get("date"):
+            try:
+                if event["socialDate"]:
+                    e = Element("date")
+                    e.text = event["socialDate"].replace("-", "")
+                    elements.append(e)
+            except KeyError:
+                pass
+        if self.additional_tags_dict.get("category"):
+            try:
+                if self.replace_categories:
+                    if event["program"]["type"]["id"] in self.replace_categories_dict:
+                        event["program"]["type"]["name"] = self.replace_categories_dict[event["program"]["type"]["id"]]
+                if event["program"]["type"]["name"]:
+                    e = Element("category", {"lang": "ru"})
+                    e.text = event["program"]["type"]["name"]
+                    elements.append(e)
+            except KeyError:
+                pass
+        if self.additional_tags_dict.get("icon"):
+            try:
+                if event["program"]["images"]:
+                    for i in event["program"]["images"]:
+                        elements.append(Element("icon", {"src": f'{self.http_scheme}{i["originalSize"]["src"]}'}))
+            except KeyError:
+                pass
+        if self.additional_tags_dict.get("country"):
+            try:
+                if event["program"]["countries"]:
+                    for i in event["program"]["countries"]:
+                        e = Element("country", {"lang": "ru"})
+                        e.text = i
+                        elements.append(e)
+            except KeyError:
+                pass
+        return elements
+
+    def _construct_progs_xmltv(self, json_data):
+        elements = []
+        if "schedules" not in json_data:
+            return False
+        for sched in json_data["schedules"]:
+            if "events" not in sched:
+                continue
+            for event in sched["events"]:
+                prog = Element(
+                    "programme",
+                    {
+                        "start": self._convert_prg_date(event["start"], self.channels_ids.get(str(event["channelId"]))),
+                        "stop": self._convert_prg_date(event["finish"], self.channels_ids.get(str(event["channelId"]))),
+                        "channel": f'{event["channelId"]}{self.xmltv_id_suffix or ""}'
+                    }
+                )
+                SubElement(prog, "title", {"lang": "ru"}).text = event["program"]["title"]
+                if self.additional_tags:
+                    prog.extend(self._construct_tags_xmltv(event))
+                elements.append(tostring(prog, encoding="unicode"))
+        return ''.join(elements)
+
+
+class YaTvExternalConfig(YaTv):
+    """Класс добавляет методы для загрузки конфигурации из внешнего файла, создания стандартного конфг. файла,
+    а также получения списка необходимых каналов из конфигурации tvheadend."""
+    def __init__(self):
+        super().__init__()
+        self.channels_from_tvh = False
+        self.tvh_channels_dir = "/home/hts/.hts/tvheadend/channel/config"
+        self.output_handler = sys.stdout
+
+    def load_user_config(self, file_path):
+        try:
+            with open(file_path, "rt") as file_handler:
+                user_config = eval(file_handler.read())
+                if user_config and type(user_config) == dict:
+                    for k, v in user_config.items():
+                        setattr(self, k, v)
+        except SyntaxError:
+            print(f" Configuration file has a syntax error! ( {file_path} )",
+                  file=self.error_handler)
+            raise
+        except OSError as err_obj:
+            print(f" Configuration file error! ({file_path})\n {err_obj}",
+                  file=self.error_handler)
+            return False
+        else:
+            return True
+
+    def get_channels_from_tvh(self):
+        if not os.path.isdir(self.tvh_channels_dir):
+            return False
+        self.channels_ids.clear()
+        tvh_channels = {}
+        for item in os.listdir(self.tvh_channels_dir):
+            file_path = os.path.join(self.tvh_channels_dir, item)
+            if not os.path.isfile(file_path):
+                return False
+            try:
+                with open(file_path, "rt") as file_handler:
+                    re_obj = re.search('"name": "([^"]+)"', file_handler.read())
+                    chan_name = re_obj.group(1)
+                    if chan_name:
+                        chan_offset = self.channels_titles.get(chan_name)
+                        tvh_channels[chan_name] = chan_offset or self.default_prg_time_offset
+            except OSError:
+                continue
+        self.channels_titles = tvh_channels
+        return True
 
     def write_config(self, config_handler=None):
         if not config_handler:
@@ -410,95 +548,67 @@ class YaTv:
         c, cfg_strings_list = 0, []
         for i in cfg_params:
             attr = getattr(self, i)
-            cfg_strings_list.append(f'    "{i}" : ')
+            cfg_strings_list.append(f'    "{i}": ')
             if type(attr) == str:
                 cfg_strings_list.append(f'"{attr:s}"')
             elif type(attr) == dict:
                 cfg_strings_list.append(repr(attr).translate({
-                        44: ",\n       ",   # ,
-                        123: "{\n        ", # {
-                        125: "\n    }",     # }
+                        44: ",\n       ",       # ,
+                        123: "{\n        ",     # {
+                        125: "\n    }",         # }
                     }))
             else:
                 cfg_strings_list.append(str(attr))
             cfg_strings_list.append(",\n")
         config_handler.write(
-            f'{{\n{"".join(cfg_strings_list)}    "channels_ids" : {{\n')
+            f'{{\n{"".join(cfg_strings_list)}    "channels_ids": {{\n')
         for k, v in channels_dict.items():
-            config_handler.write(f'        "{v}" : None,\t\t# {c + 1}. {k}\n')
+            config_handler.write(f'        "{v}": None,\t\t# {c + 1}. {k}\n')
             c += 1
-        config_handler.write('    },\n    "channels_titles" : {},\n}\n')
+        config_handler.write('    },\n    "channels_titles": {},\n}\n')
         return c
 
     def run(self):
-        progs_request_params = f'"channelLimit":{self.chans_per_request},"channelProgramsLimit":500,"fields":"availableChannels,availableChannelsIds,schedules,title,{self.additional_tags and self.additional_tags_req_str or ""}id,events,channelId,start,finish,program,name","duration":{self.duration * 86400},"start":"{self.start_date}"'
-        self.progs_request_url_pattern = self.base_url + '&params={{' + parse.quote(
-            progs_request_params + ',"channelIds":[{}]', safe="{}"
-        ) + '}}'
-        return_code = 1
         if self.channels_from_tvh:
             if not self.get_channels_from_tvh():
                 print(
                     f" Path error! {self.tvh_channels_dir} not a directory or does not exists",
                     file=self.error_handler)
-                return return_code
-        json_chans_data = self._get_channels_data()
-        if json_chans_data:
-            channels_dict = self._make_channels_dict(json_chans_data, True)
-            for k, v in self.channels_titles.items():
-                if k.lower() in channels_dict:
-                    self.channels_ids[channels_dict[k.lower()]] = v
-            if not self.channels_ids:
-                for k, v in channels_dict.items():
-                    self.channels_ids[v] = self.default_prg_time_offset
-        self.output_handler.write(
-            f'<?xml version="1.0" encoding="{self.site_encoding}"?>\n<!DOCTYPE tv SYSTEM "xmltv.dtd">\n<tv source-info-url="{self.src_url}" source-info-name="{self.src_name}" source-data-url="{self.http_scheme}{self.api_url}" generator-info-name="{self.app_name}" generator-info-url="{self.app_url}">\n')
-        chans_items, chans_requests = 0, 0
-        for c in self._pick_channels_json(json_chans_data):
-            if self._write_chan_xmltv(c):
-                chans_items += 1
-        if chans_items > 0:
-            for j in self._get_programs_data():
-                if self._write_progs_xmltv(j):
-                    chans_requests += 1
-                if self.req_timout:
-                    time.sleep(self.req_timout)
-            if chans_requests > 0:
-                return_code = 0
-        self.output_handler.write("</tv>\n")
-        return return_code
+                return 1
+        return super().run()
 
 
 if __name__ == "__main__":
     from argparse import ArgumentParser
-    yatv = YaTv()
+    yatv = YaTvExternalConfig()
     default_user_config = user_config = config_handler = None
+    output_handler = sys.stdout
     for path in ("tv_grab_ru_yatv.cfg", "/home/hts/tv_grab_ru_yatv.cfg",
-                "/etc/tv_grab_ru_yatv.cfg", "/opt/etc/tv_grab_ru_yatv.cfg"):
+                 "/etc/tv_grab_ru_yatv.cfg", "/opt/etc/tv_grab_ru_yatv.cfg"):
         if os.path.exists(path):
             default_user_config = path
             break
     arg_parser = ArgumentParser()
     arg_parser.add_argument("--config-file", action="store", type=str,
-        help="Configuration file", dest="config_file")
+                            help="Configuration file", dest="config_file")
     arg_parser.add_argument("--offset", action="store", type=int,
-        help="Start offset (days)", dest="offset")
+                            help="Start offset (days)", dest="offset")
     arg_parser.add_argument("--days", action="store", type=int,
-        help="Duration", dest="days")
+                            help="Duration", dest="days")
     arg_parser.add_argument("--output", action="store", type=str,
-        help="Output file", dest="output")
+                            help="Output file", dest="output")
     arg_parser.add_argument("--configure", action="store_true",
-        help="Create default configuration file", dest="configure")
+                            help="Create default configuration file", dest="configure")
     arg_parser.add_argument("--version", action="store_true",
-        help="Version", dest="version")
+                            help="Version", dest="version")
     arg_parser.add_argument("--description", action="store_true",
-        help="Description", dest="description")
+                            help="Description", dest="description")
     arg_parser.add_argument("--capabilities", action="store_true",
-        help="Capabilities", dest="capabilities")
+                            help="Capabilities", dest="capabilities")
     arg_parser.add_argument("--quiet", action="store_true",
-        help="Quiet output", dest="quiet")
+                            help="Quiet output", dest="quiet")
     arg_parser.add_argument("--region", action="store", type=int,
-        help="Region value for tv.yandex.ru", dest="region")
+                            help="Region value for tv.yandex.ru", dest="region")
     args = arg_parser.parse_args()
     if args.config_file:
         user_config = args.config_file
@@ -510,7 +620,7 @@ if __name__ == "__main__":
                 config_handler = open(user_config, "w")
         except OSError as err_obj:
             print(f" Configuration file error! ( {user_config} )\n {err_obj}",
-                file=sys.stderr)
+                  file=sys.stderr)
             sys.exit(1)
         else:
             if yatv.write_config(config_handler) > 0:
@@ -538,9 +648,13 @@ if __name__ == "__main__":
         sys.exit(0)
     if args.output:
         try:
-            yatv.output_handler = open(args.output, "w")
+            output_handler = open(args.output, "w")
         except OSError as err_obj:
             print(f" Output file error! ( {args.output} )\n {err_obj}",
-                file=sys.stderr)
+                  file=sys.stderr)
             sys.exit(1)
-    sys.exit(yatv.run())
+    xmltv_items = -2
+    for entry in yatv.run():
+        output_handler.write(entry)
+        xmltv_items += 1
+    sys.exit(0 if xmltv_items > 0 else 1)
