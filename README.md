@@ -1,3 +1,6 @@
+# Яндекс закрыл публичный API телепрограммы, поэтому граббер более не работоспособен.
+
+
 ## tv_grab_ru_yatv
 
 Программа [tv.yandex.ru](https://tv.yandex.ru) в HTS Tvheadend.
